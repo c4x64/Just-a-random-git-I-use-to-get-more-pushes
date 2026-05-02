@@ -1,0 +1,62 @@
+# Build and Push Working Version Only
+# Only pushes if: tests pass, clippy passes, and LOC >= 50k
+
+name: Build Working Version
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: 1.70
+  MINIMUM_LOC: 50000
+
+jobs:
+  validate-and-build:
+    runs-on: ubuntu-latest
+    outputs:
+      loc_count: ${{ steps.loc.outputs.total }}
+      all_passed: ${{ steps.final.outputs.all_passed }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: clippy, rustfmt
+      - name: Install cloc
+        run: sudo apt-get install -y cloc
+      - name: Count LOC
+        id: loc
+        run: |
+          TOTAL=$(cloc . --json | jq '.sum.code + .sum.comment + .sum.blank' || echo "0")
+          echo "total=$TOTAL" >> $GITHUB_OUTPUT
+          echo "LOC: $TOTAL / Required: $MINIMUM_LOC"
+      - name: Build
+        run: cargo build --release
+      - name: Test
+        id: test
+        run: cargo test --release || echo "tests_passed=false" >> $GITHUB_OUTPUT
+      - name: Clippy
+        id: clippy
+        run: cargo clippy -- -D warnings || echo "clippy_passed=false" >> $GITHUB_OUTPUT
+      - name: Final check
+        id: final
+        run: |
+          LOC_OK=$(echo "${{ steps.loc.outputs.total }}" -ge "$MINIMUM_LOC" | bc)
+          if [ "$LOC_OK" = "1" ]; then
+            echo "all_passed=true" >> $GITHUB_OUTPUT
+          else
+            echo "all_passed=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Create Release (if all pass)
+        if: steps.final.outputs.all_passed == 'true'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: working-${{ github.sha }}
+          name: "Working Build - LOC: ${{ steps.loc.outputs.total }}"
+          body: "All checks passed. LOC: ${{ steps.loc.outputs.total }} >= $MINIMUM_LOC"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

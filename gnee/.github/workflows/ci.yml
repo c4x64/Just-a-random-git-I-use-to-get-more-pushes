@@ -1,0 +1,74 @@
+# CI/CD Pipeline for GNEE
+# Builds and pushes only working builds with 50k+ LOC baseline
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: 1.70
+  MINIMUM_LOC: 50000
+
+jobs:
+  quality-check:
+    runs-on: ubuntu-latest
+    outputs:
+      loc_count: ${{ steps.loc-check.outputs.loc_count }}
+      loc_passed: ${{ steps.loc-check.outputs.loc_passed }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cloc
+        run: sudo apt-get install -y cloc
+      - name: Count lines of code
+        id: loc-check
+        run: |
+          TOTAL=$(cloc . --json | jq '.sum.code + .sum.comment + .sum.blank' || echo "0")
+          echo "loc_count=$TOTAL" >> $GITHUB_OUTPUT
+          echo "Total: $TOTAL / Required: $MINIMUM_LOC"
+          if [ "$TOTAL" -ge "$MINIMUM_LOC" ]; then
+            echo "✓ LOC baseline met"
+            echo "loc_passed=true" >> $GITHUB_OUTPUT
+          else
+            echo "✗ LOC baseline NOT met"
+            echo "loc_passed=false" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: quality-check
+    if: needs.quality-check.outputs.loc_passed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: Build
+        run: cargo build --release
+      - name: Run tests
+        run: cargo test --release
+
+  release:
+    needs: [quality-check, build]
+    if: github.ref == 'refs/heads/main' && needs.quality-check.outputs.loc_passed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get version
+        id: version
+        run: echo "version=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)" >> $GITHUB_OUTPUT
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: "GNEE v${{ steps.version.outputs.version }}"
+          body: "Automated release - LOC: ${{ needs.quality-check.outputs.loc_count }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
